@@ -1,0 +1,8 @@
+---
+title: "Comp_nominal"
+author: "Bastien Grasset"
+date: "11/02/2022"
+output: html_document
+---
+
+This document is intended for anyone wishing to use the tuna atlas data. It presents the difference between the nominal catch data and the localised data. It presents also what element are lost while raising to the nominal data.

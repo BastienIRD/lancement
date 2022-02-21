@@ -1,0 +1,173 @@
+---
+title: "Markdown_presentation_filtre_totaux"
+author: "Bastien Grasset"
+date: "09/02/2022"
+output: html_document
+params:
+  initial: "Data/end_step2_level0_2.csv"
+  final: "Data/end_step2_level0.csv"
+runtime: shiny
+---
+
+Ce markdown a pour objectif de décrire les pertes des données de l'atlas thonier mondial suite aux différents filtres effectués. 
+Il décrit les différences entre les données initiales et les données finales, il est à destination des utilisateurs de la donnée finale qui seraient tentés de l'utiliser sans prendre en compte les différentes spécificités des filtres.
+
+# Les données 
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(dplyr)
+library(readr)
+
+```
+
+
+
+```{r}
+colnames_to_keep <- c("fishingfleet",         "gear",                 "time_start",           "time_end",            
+"geographic_identifier","schooltype",           "species",              "catchtype",           
+ "unit",                 "value",                "source_authority")
+init <- read.csv(params$init) %>% select(colnames_to_keep)
+
+final <- read.csv(params$final)%>% select(colnames_to_keep)
+```
+
+
+```{r}
+num_column <- unlist(lapply(init, is.numeric))  
+```
+
+```{r}
+for (i in num_column){
+  i <- enquote(i)
+  summarise <- init %>% summarise(sum = sum(!!i))
+  summarise
+}
+```
+
+
+
+```{r eval=FALSE}
+
+# # Les pertes générales
+# 
+# Les pertes en nombre de poisson sont de : `r perte_en_poisson`
+# Les pertes sur les données en tonnes sont de :`r perte_en_tonne`
+# 
+# # Les pertes sur les données spatialisées
+# 
+# Les différents filtres effectués font perdre environ `r pourcent_des_donnees_spatialisees` pourcentage des données spatialisées.
+
+```
+
+```{r}
+fonction_groupement = function(x, init, final){
+  x  <-   enquo(x)
+  groupement_1  <-   init %>% group_by(!!x,unit) %>% summarise(value_sum_1 = sum(value, na.rm=TRUE)) 
+  
+  groupement_2  <-   final %>% group_by(!!x,unit) %>% summarise(value_sum_2 = sum(value, na.rm=TRUE))
+  
+  fulljoin  <-   full_join(groupement_1, groupement_2) %>% 
+    mutate(Perte = 100*((value_sum_1 - value_sum_2)/value_sum_1))%>% mutate_if(is.numeric, funs(ifelse(is.na(.), 0, .)))%>% mutate(Variable = colnames(groupement_1[1])) %>%
+    rename("Precision" = 1) %>% mutate(Precision = as.character(Precision))
+}
+```
+
+
+# Les pertes pour chaque variable
+
+Nous allons regarder pour chaque variable les pertes les plus importantes
+
+```{r}
+
+
+
+variables <- colnames(init)[colnames(init) != "unit" & colnames(init)!= "value"]
+  t <- init[0,]
+  
+
+
+for (i in variables){
+  temporaire <- fonction_groupement(.data[[i]],init, final)
+  assign(paste0("test", i), temporaire)
+  
+  t <- rbind(t, temporaire)
+}
+  
+  donne_spatio <- init %>% mutate(Spatialisation = as.factor(substr(geographic_identifier,1,1)))
+
+```
+
+
+```{r}
+
+t$Variable <-as.character(t$Variable)
+t$Precision <-as.character(t$Precision)
+
+library(shiny)
+ui <-fluidPage(
+  selectInput("Variable", "Variable", choices = unique(t$Variable)),
+  sliderInput("Nombre_lignes", "Nombres de lignes à afficher", min = 5, max = 2000, value = 1),
+  tableOutput("Variable"),
+  plotOutput("graph_Variable"),
+
+  selectInput("Precision", "Precision", choices = NULL),
+  tableOutput("Precision"),
+  plotOutput("graph_Precision")
+)
+server <- function(input, output, session) {
+  Variable <- reactive({
+    filter(t, Variable == input$Variable)
+  })
+  observeEvent(Variable(), {
+    choices <- unique(Variable()$Precision)
+    updateSelectInput(inputId = "Precision", choices = choices) 
+  })
+  
+  Precision <- reactive({
+    req(input$Precision)
+    filter(Variable(), Precision == input$Precision)
+  })
+  
+  output$Precision <- renderTable({
+    req(input$Precision)
+    Precision() %>% 
+      filter(Precision == input$Precision) 
+  })
+  output$Variable <- renderTable({
+    req(input$Nombre_lignes)
+    req(input$Variable)
+    Variable() %>% 
+      filter(Variable == input$Variable) %>% arrange(desc(Perte)) %>% head(as.numeric((input$Nombre_lignes)))
+  })  
+  output$graph_Precision <- renderPlot({
+  req(input$Precision)
+  req(input$Variable)
+
+  ggplot(Variable()%>% 
+      filter(Variable == input$Variable)) +
+  aes(x = input$Precision, weight = Perte) +
+  geom_bar(fill = "#112446") +
+  theme_minimal() +
+  facet_wrap(vars(unit))})
+  
+  output$graph_Variable <- renderPlot({
+  req(input$Variable)
+
+  ggplot(Variable()%>% 
+      filter(Variable == input$Variable)) +
+  aes(x = Precision, weight = Perte) +
+  geom_bar(fill = "#112446") +
+  theme_minimal() +
+  facet_wrap(vars(unit))})
+
+}
+
+shinyApp(ui, server)
+```
+
+
+

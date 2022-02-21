@@ -1,0 +1,559 @@
+---
+title: "global_catch_firms_level0_analyse"
+author: "Bastien Grasset"
+date: "15/02/2022"
+output: html_document
+params:
+  mapping_map_code_lists: TRUE
+  raising_georef_to_nominal: TRUE
+  mapping_keep_src_code: FALSE
+  fact: catch
+  include_IATTC: yes
+  include_ICCAT: yes
+  include_IOTC: yes
+  include_WCPFC: yes
+  include_CCSBT: yes
+  iccat_nominal_catch_spatial_stratification: "stock_area"
+  SBF_data_rfmo_to_keep: "CCSBT"
+  geom_table: "area.erased_area_labels"
+  resolution_filter: NULL
+  overlapping_zone_iattc_wcpfc_data_to_keep: NULL
+  resolution_required: NULL
+---
+
+```{r}
+
+# action_option_include_IATTC:true_
+# action_option_include_ICCAT:true_
+# action_option_include_IOTC:true_
+# action_option_include_WCPFC:true_
+# action_option_include_CCSBT:true_
+# action_option_mapping_map_code_lists:true_
+# action_option_mapping_keep_src_code:false_
+# action_option_iccat_nominal_catch_spatial_stratification:stock_area_
+# action_option_SBF_data_rfmo_to_keep:CCSBT_
+# action_option_geom_table:area.erased_area_labels
+
+```
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+	echo = FALSE,
+	message = FALSE,
+	warning = FALSE
+)
+```
+
+
+```{r include=FALSE}
+library(geoflow)
+library(RPostgreSQL)
+library(here)
+library(readr)
+library(dplyr)
+library(RPostgres)
+library(devtools)
+install_github("eblondel/rtunaatlas")
+library(rtunaatlas)
+```
+
+
+
+
+
+```{r}
+nominal_catch <- read.csv(file = here("Data/global_nominal_catch_firms_level0.csv"),stringsAsFactors=TRUE)
+dataset <- read.csv("Data/global_catch_firms_level0.csv", stringsAsFactors=TRUE) %>% mutate(gear = as.factor(gear)) %>% mutate(time_start = lubridate::as_date(time_start), time_end = lubridate::as_date(time_end))
+  dataset$time_start<-substr(as.character(dataset$time_start), 1, 10)
+  dataset$time_end<-substr(as.character(dataset$time_end), 1, 10)
+  dataset$gear <- as.factor(dataset$gear)
+  georef_dataset<-dataset
+  class(georef_dataset$value) <- "numeric"
+Dbname ="tunaatlas_dumped"
+  User="tunaatlas_u"
+Password="21c0551e7ed2911"
+  Host="localhost"
+DRV="PostgreSQL"
+
+library("DBI")
+DRV=RPostgres::Postgres()
+#######################
+# con <- dbConnect(drv = DRV,dbname=Dbname, host=Host, user=User,password=Password)
+con <- dbConnect(drv=DRV,
+                 dbname = Dbname,
+                 host = Host,
+                 user=User,
+                 password=Password)
+georef_dataset_init <- dataset
+```
+
+Le jeu de données est ici non modifié, il y a toutes les données pour toutes les ORGP. 
+
+```{r}
+url_scripts_create_own_tuna_atlas <- "https://raw.githubusercontent.com/eblondel/geoflow-tunaatlas/master/tunaatlas_scripts/generation"
+source(file.path(url_scripts_create_own_tuna_atlas, "get_rfmos_datasets_level0.R")) #modified for geoflow
+source(file.path(url_scripts_create_own_tuna_atlas, "retrieve_nominal_catch.R")) #modified for geoflow
+source(file.path(url_scripts_create_own_tuna_atlas, "map_codelists.R")) #modified for geoflow
+source(file.path(url_scripts_create_own_tuna_atlas, "convert_units.R")) #modified for geoflow
+```
+
+
+```{r eval=FALSE, include=FALSE}
+
+# config$logger.info("LEVEL 0 => STEP 2/8: Map code lists ")
+#-----------------------------------------------------------------------------------------------------------------------------------------------------------
+#mapping_map_code_lists is TRUE on this markdown
+
+if (!is.null( params$mapping_map_code_lists)) if( params$mapping_map_code_lists){
+
+  #config$logger.info("Reading the CSV containing the dimensions to map + the names of the code list mapping datasets. Code list mapping datasets must be available in the database.")
+
+  mapping_dataset <- read_csv("Data/codelist_mapping_rfmos_to_global.csv")
+
+  # mapping
+  if(!is.null( params$mapping_keep_src_code)) mapping_keep_src_code =  params$mapping_keep_src_code
+
+  #config$logger.info("Mapping code lists of georeferenced datasets...")
+  georef_dataset <- map_codelists(con, "catch", mapping_dataset, georef_dataset, mapping_keep_src_code)
+  #config$logger.info("Mapping code lists of georeferenced datasets OK")
+
+  if(!is.null( params$raising_georef_to_nominal)) if( params$raising_georef_to_nominal){
+    #config$logger.info("Mapping code lists of nominal catch datasets...")
+    nominal_catch <- map_codelists(con, "catch", mapping_dataset, nominal_catch, mapping_keep_src_code)
+    #config$logger.info("Mapping code lists of nominal catch datasets OK")
+  }
+}
+
+```
+
+
+
+```{r }
+#-----------------------------------------------------------------------------------------------------------------------------------------------------------
+         #config$logger.info("LEVEL 0 => STEP 3/8: Apply filters on fishing gears if needed (Filter data by groups of gears) ")
+         #-----------------------------------------------------------------------------------------------------------------------------------------------------------
+           gear_filter<-unique(georef_dataset$gear)
+           #config$logger.info(sprintf("Filtering by gear(s) [%s]", paste(gear_filter, collapse=",")))	
+           georef_dataset_gear_filtered <- georef_dataset %>% dplyr::filter(gear %in% gear_filter) %>% mutate(gear = as.character(gear))
+           #config$logger.info("Filtering gears OK")
+           georef_dataset <- georef_dataset_gear_filtered
+```
+
+Il n'y a pas de filtres sur les engins. Ils sont tous gardés.
+
+```{r}
+`%notin%` <- Negate(`%in%`)
+library(scales)
+library(ggplot2)
+gear_filter <- unique(georef_dataset$gear)
+group_gear <- georef_dataset_init %>% mutate(Filtre = case_when(
+    gear %in% gear_filter ~ "Gardé",
+    gear %notin% gear_filter ~ "Filtré"
+    ))%>% group_by(gear, unit, Filtre) %>% summarise(Value_tot = sum(value, na.rm = TRUE)) %>% 
+  group_by(unit) %>% 
+  mutate(Pourcentage = 100*(Value_tot/sum(Value_tot))) 
+
+
+
+ggplot(group_gear%>% 
+  group_by(unit) %>% 
+  arrange(desc(gear)) %>%
+  mutate(ypos = cumsum(Pourcentage)- 0.5*Pourcentage ), aes(x="", y=Pourcentage, fill=gear)) +
+  geom_bar(stat="identity", width=1) +
+  coord_polar("y", start=0) +
+  theme_void() +
+  geom_text(aes(y = ypos, label = paste0(round(Pourcentage),"%")), size=3)+facet_wrap("unit")
+
+```
+
+
+```{r}
+ggplot(group_gear) +
+  aes(
+    x = gear,
+    fill = Filtre,
+    group = Filtre,
+    weight = Pourcentage
+  ) +
+  geom_bar() +
+  scale_fill_hue(direction = 1) +
+  theme_minimal() +
+  facet_wrap(vars(unit), nrow = 2)
+```
+
+
+```{r}
+
+group_filter <- georef_dataset_init %>% mutate(Filtre = case_when(
+    gear %in% gear_filter ~ "Gardé",
+    gear %notin% gear_filter ~ "Filtré"
+    )) %>% group_by(unit,Filtre) %>% summarise(Value_tot = sum(value, na.rm = TRUE)) %>% 
+  mutate(Pourcentage = 100*(Value_tot/sum(Value_tot))) 
+
+ggplot(group_filter%>% 
+  group_by(unit, Filtre) %>% 
+  arrange(desc(Pourcentage)) %>%
+  mutate(ypos = cumsum(Pourcentage) - 0.5*Pourcentage ), aes(x="", y=Pourcentage, fill=Filtre)) +
+  geom_bar(stat="identity", width=1) +
+  coord_polar("y", start=0) +
+  theme_void() +
+  geom_text(aes(y = ypos, label = paste0(round(Pourcentage),"%")), size=3)+facet_wrap("unit")
+```
+
+Tout est gardé dans cette première partie.
+
+## Analyse de la perte en pourcent pour certains facteurs des variables.
+
+```{r}
+fonction_groupement = function(x, init, filtered){
+  x  <-   enquo(x)
+  groupement_1  <-   init %>% group_by(!!x,unit) %>% summarise(value_sum_1 = sum(value, na.rm=TRUE)) 
+  
+  groupement_2  <-   filtered %>% group_by(!!x,unit) %>% summarise(value_sum_2 = sum(value, na.rm=TRUE))
+  
+  fulljoin  <-   full_join(groupement_1, groupement_2)%>% mutate_if(is.numeric, funs(ifelse(is.na(.), 0, .))) %>% 
+    mutate(Perte = ((value_sum_1 - value_sum_2)/value_sum_1) * 100)%>% mutate(Variable = colnames(groupement_1[1])) %>%
+    rename("Precision" = 1) %>% mutate(Precision = as.character(Precision))
+}
+variables <- colnames(georef_dataset)[colnames(georef_dataset) %notin% c("unit", "value","gear")]
+  gear_filtered_grouped_all <- georef_dataset[0,]
+
+for (i in variables){
+  temporaire <- fonction_groupement(.data[[i]], georef_dataset_init, georef_dataset_gear_filtered)
+  assign(paste0("gear_filtered_group_by_",i), temporaire)
+  
+  gear_filtered_grouped_all <- rbind(gear_filtered_grouped_all, temporaire)
+  }
+
+ggplot(gear_filtered_grouped_all) +
+ aes(x = Variable, y = Perte, colour = unit) +
+ geom_boxplot(fill = "#112446") +
+ scale_color_hue(direction = 1) +
+ theme_minimal()
+
+gear_filtered_grouped_all %>%
+ filter(!(Variable %in% c("geographic_identifier", "schooltype", "catchtype"))) %>%
+ ggplot() +
+ aes(x = Perte, group = Variable) +
+ geom_histogram(bins = 30L, fill = "#112446") +
+ theme_minimal() +
+ facet_wrap(vars(Variable))
+
+```
+
+
+```{r}
+# 
+# library(dplyr)
+# library(ggplot2)
+# library(cowplot)
+# 
+# fonction_groupement_filtre_cinq_max <- function(x){
+#   x <- enquo(x)
+#   groupement_1 <- georef_dataset %>% group_by(!!x,unit) %>% summarise(value_sum_1 = sum(value, na.rm=TRUE)) %>% mutate_all(~replace(., is.na(.), 0))
+# 
+# groupement_2 <- georef_dataset2 %>% group_by(!!x,unit) %>% summarise(value_sum_2 = sum(value, na.rm=TRUE))%>% mutate_all(~replace(., is.na(.), 0))
+# 
+#  fulljoin <- full_join(groupement_1, groupement_2) %>% mutate(diff = 100*(value_sum_1 - value_sum_2)/value_sum_1)%>% filter(diff != 0)%>% mutate_all(~replace(., is.na(.), 0))
+# 
+# nombre <- fulljoin %>% filter(unit == "no") %>% arrange(desc(diff)) %>% head()
+# poids <- fulljoin %>% filter(unit == "t") %>% arrange(desc(diff)) %>% head()
+# 
+# ggplot_cinq_max =function(poids_ou_nombre){
+# ggplot(poids_ou_nombre %>% filter(diff != 0)) +
+#   aes(
+#     x = !!x,
+#     y = diff,
+#     fill = !!x,
+#     colour = !!x
+#   ) +
+#   geom_boxplot() +
+#   scale_fill_hue(direction = 1) +
+#   scale_color_hue(direction = 1) +
+#   theme_minimal()+geom_hline(yintercept=0, linetype="dashed",                 color = "red", size=0.5)}
+# 
+# plot_grid(ggplot_cinq_max(poids), 
+# ggplot_cinq_max(nombre), labels = c('Poids', 'Nombre'), label_size = 12)
+# 
+# }
+# 
+# 
+# 
+# fishingfleet <- fonction_groupement_filtre_cinq_max(fishingfleet)
+# species <- fonction_groupement_filtre_cinq_max(species)
+# 
+# plot_grid(fishingfleet, species)
+# geographic_identifier <- fonction_groupement_filtre_cinq_max(geographic_identifier)
+# geographic_identifier
+
+```
+
+```{r}
+split_data <- gear_filtered_grouped_all %>% group_by(unit, Variable)%>% arrange(desc(Perte))   %>% group_split() 
+recombined_data <- lapply(split_data, function(x) head(x, 5)) %>% bind_rows()
+
+library(kableExtra)
+col_order <- c("Variable", "Precision", "unit","Perte",
+               "value_sum_1", "value_sum_2" )
+recombined_data <- recombined_data[, col_order]
+recombined_data %>% group_split(Variable, Precision)%>% kbl() %>% kable_styling(bootstrap_options = c("striped", "hover")) 
+
+```
+
+
+```{r}
+
+somme <- function(y,x){sum((y %>% filter(unit == x))$value)}
+
+somme_value_1_no <- somme(georef_dataset_init, "no")
+somme_value_2_no <- somme(georef_dataset_gear_filtered, "no")
+
+somme_value_1_t <- somme(georef_dataset_init, "t")
+somme_value_2_t <- somme(georef_dataset_gear_filtered, "t")
+
+
+diff_nombre <- (somme_value_1_no - somme_value_2_no) 
+diff_poids <- (somme_value_1_t - somme_value_2_t) 
+
+diff_percent_nb <- 100*(diff_nombre / somme_value_1_no)
+diff_percent_t <- 100*(diff_poids / somme_value_1_t)
+
+```
+
+
+La perte représentée par le filtre sur ces engins est de : 
+du total en tonnes :`r diff_nombre` millions de tonnes
+du total en nombre :`r diff_poids` milliards de poissons
+
+On perd environ `r diff_percent_nb` % du nombre de poissons et `r diff_percent_t` % du poids total.
+
+## Deuxième partie : Filtre sur les données du Southern Bluefin Thuna (SBF)
+
+```{r }
+#-----------------------------------------------------------------------------------------------------------------------------------------------------------
+         #config$logger.info("LEVEL 0 => STEP 4/8: Southern Bluefin Tuna (SBF): SBF data: keep data from CCSBT or data from the other tuna RFMOs? ")
+         #-----------------------------------------------------------------------------------------------------------------------------------------------------------
+georef_dataset <- georef_dataset_gear_filtered
+
+         if (params$fact=="catch" &&  params$include_CCSBT && !is.null( params$SBF_data_rfmo_to_keep)){
+           #config$logger.info(paste0("Keeping only data from ", params$SBF_data_rfmo_to_keep," for the Southern Bluefin Tuna..."))
+           if ( params$SBF_data_rfmo_to_keep=="CCSBT"){
+             georef_dataset_sbf_filtered <- georef_dataset[ which(!(georef_dataset$species %in% "SBF" & georef_dataset$source_authority %in% c("ICCAT","IOTC","IATTC","WCPFC"))), ]
+           } else {
+             georef_dataset_sbf_filtered <- georef_dataset[ which(!(georef_dataset$species %in% "SBF" & georef_dataset$source_authority == "CCSBT")), ]
+           }
+           #config$logger.info(paste0("Keeping only data from ", params$SBF_data_rfmo_to_keep," for the Southern Bluefin Tuna OK"))
+           georef_dataset <- georef_dataset_sbf_filtered
+         }
+
+
+
+
+```
+
+Ici on se demande si les données du Southern Bluefin Tuna doivent être conservées dans les jeux de données envoyées par CCSBT et par les autres ORGP. 
+
+Pour les captures, si l'option d'inclure CCBST est choisie, on garde uniquement CCBST. Sinon on enlève toutes les données de CCSBT.
+L'action choisie ici est de garder uniquement les données de CCBST. 
+
+En effet, pour cette espèce, il n'y a que des données provenant de CCBST. On remarque également que toutes les données sont en tonnes.
+
+Attention ! En réunion avec Emmanuel Blondel et Julien Barde 27/01/2022, Emmanuel a fait remonté le fait que les données de la CTOI ont, pour l'espèce en question, 15 années d'antériorités par rapport aux données de la CCSBT. Ce problème fait donc perdre 15 années potentielles pour les données de cette espèce. On ne retrouve cependant pas ces données dans notre fichier. Cependant, dans le jeu de données utilisé, il n'y a aucune donnée pour le SBF.
+
+
+```{r }
+#-----------------------------------------------------------------------------------------------------------------------------------------------------------
+         #config$logger.info("LEVEL 0 => STEP 5/8: Grid spatial resolution filter")
+         #-----------------------------------------------------------------------------------------------------------------------------------------------------------
+
+         if (!is.null(params$resolution_filter)){
+           georef_dataset_geographic_filter <- georef_dataset[startsWith(as.character(georef_dataset$geographic_identifier),  params$resolution_filter),]
+          georef_dataset<- georef_dataset_geographic_filter
+         }
+
+```
+
+On ne garde que la donnée pour laquelle le geographic identifier commence par 5. (Bizzare ?)
+action_option_resolution_filter:5_
+
+## Analyse du filtre sur les données géographiques
+
+```{r eval= !is.null(params$resolution_filter)}
+`%notin%` <- Negate(`%in%`)
+library(scales)
+library(ggplot2)
+
+georef_dataset_geographic_filter <- georef_dataset %>% mutate(Filtre = case_when(
+    startsWith(as.character(geographic_identifier),  params$resolution_filter) ~ "Gardé",
+    TRUE ~ "Filtré"
+    ))%>% group_by(geographic_identifier, unit, Filtre) %>% summarise(Value_tot = sum(value, na.rm = TRUE)) %>% 
+  group_by(unit) %>% 
+  mutate(Pourcentage = 100*(Value_tot/sum(Value_tot)))
+
+ggplot(georef_dataset_geographic_filter%>% 
+  group_by(unit, Filtre) %>% 
+  arrange(desc(Pourcentage)) %>%
+  mutate(ypos = cumsum(Pourcentage) - 0.5*Pourcentage ), aes(x="", y=Pourcentage, fill=Filtre)) +
+  geom_bar(stat="identity", width=1) +
+  coord_polar("y", start=0) +
+  theme_void() +
+  geom_text(aes(y = ypos, label = paste0(round(Pourcentage),"%")), size=3)+facet_wrap("unit")
+
+```
+
+
+```{r}
+ggplot(georef_dataset_geographic_filter) +
+  aes(
+    x = Filtre,
+    fill = Filtre,
+    group = Filtre,
+    weight = Pourcentage
+  ) +
+  geom_bar() +
+  scale_fill_hue(direction = 1) +
+  theme_minimal() +
+  facet_wrap(vars(unit), nrow = 2)
+```
+
+
+```{r}
+group_filter <- georef_dataset %>% mutate(Filtre = case_when(
+    gear %in% gear_filter ~ "Gardé",
+    gear %notin% gear_filter ~ "Filtré"
+    )) %>% group_by(unit,Filtre) %>% summarise(Value_tot = sum(value, na.rm = TRUE)) %>% 
+  mutate(Pourcentage = 100*(Value_tot/sum(Value_tot))) 
+
+ggplot(group_filter%>% 
+  group_by(unit, Filtre) %>% 
+  arrange(desc(Pourcentage)) %>%
+  mutate(ypos = cumsum(Pourcentage) - 0.5*Pourcentage ), aes(x="", y=Pourcentage, fill=Filtre)) +
+  geom_bar(stat="identity", width=1) +
+  coord_polar("y", start=0) +
+  theme_void() +
+  geom_text(aes(y = ypos, label = paste0(round(Pourcentage),"%")), size=3)+facet_wrap("unit")
+```
+
+
+# Aggregation on 5 deg of inferior resolution action_option_aggregate_on_5deg_data_with_resolution_inferior_to_5deg
+
+```{r }
+#-----------------------------------------------------------------------------------------------------------------------------------------------------------
+         #config$logger.info("LEVEL 0 => STEP 6/8: Spatial Aggregation of data (5deg resolution datasets only: Aggregate data on 5° resolution quadrants)")
+         #-----------------------------------------------------------------------------------------------------------------------------------------------------------
+         if(!is.null( params$aggregate_on_5deg_data_with_resolution_inferior_to_5deg)) if ( params$aggregate_on_5deg_data_with_resolution_inferior_to_5deg) {
+           
+           #config$logger.info("Aggregating data that are defined on quadrants or areas inferior to 5° quadrant resolution to corresponding 5° quadrant...")
+           georef_dataset<-rtunaatlas::spatial_curation_upgrade_resolution(con, georef_dataset, 5)
+           georef_dataset<-georef_dataset$df         }
+
+```
+
+Ici on passe, ou non,  toute la donnée inférieure à 5deg en 5deg. Ce choix permet d'harmoniser la grille des captures et permet aux scientifiques qui n'ont pas besoin d'une résolution inférieure à 5 degrés de récupérer une donnée éditée et utilisable. 
+
+Here all the data below 5deg is switched to 5deg or not. This choice allows to harmonize the grid of the captures and allows the scientists who do not need a resolution lower than 5 degrees to recover an edited and usable data. 
+
+```{r }
+# fill metadata elements
+           # lineage<-"Data that were provided at spatial resolutions inferior to 5° x 5°  were aggregated to the corresponding 5° x 5°  quadrant."
+           # aggregate_step = geoflow_process$new()
+           # aggregate_step$setRationale(lineage)
+           # aggregate_step$setProcessor(firms_contact)  #TODO define who's the processor
+           # entity$provenance$processes <- c(entity$provenance$processes, aggregate_step)	
+           # entity$descriptions[["abstract"]] <- paste0(entity$descriptions[["abstract"]], "\n", "- Data that were provided at resolutions inferior to 5° x 5°  were aggregated to the corresponding 5° x 5°  quadrant.")
+           
+           
+           #config$logger.info("Aggregating data that are defined on quadrants or areas inferior to 5° quadrant resolution to corresponding 5° quadrant OK")
+           
+         
+         #-----------------------------------------------------------------------------------------------------------------------------------------------------------
+
+         #config$logger.info("LEVEL 0 => STEP 7/8: Overlapping zone (IATTC/WCPFC): keep data from IATTC or WCPFC?")
+         #-----------------------------------------------------------------------------------------------------------------------------------------------------------
+
+```
+
+```{r }
+         if ( params$include_IATTC &&  params$include_WCPFC && !is.null( params$overlapping_zone_iattc_wcpfc_data_to_keep)) {
+           
+           overlapping_zone_iattc_wcpfc_data_to_keep <-  params$overlapping_zone_iattc_wcpfc_data_to_keep
+           #config$logger.info(paste0("Keeping only data from ",overlapping_zone_iattc_wcpfc_data_to_keep," in the IATTC/WCPFC overlapping zone..."))
+# query the database to get the codes of IATTC and WCPFC overlapping areas (stored under the view area.iattc_wcpfc_overlapping_cwp_areas)
+           query_areas_overlapping_zone_iattc_wcpfc <- "SELECT codesource_area from
+			(WITH iattc_area_of_competence AS (
+					 SELECT rfmos_convention_areas_fao.geom
+					   FROM area.rfmos_convention_areas_fao
+					  WHERE code::text = 'IATTC'::text
+					), wcpfc_area_of_competence AS (
+					 SELECT rfmos_convention_areas_fao.geom
+					   FROM area.rfmos_convention_areas_fao
+					  WHERE code::text = 'WCPFC'::text
+					), geom_iattc_wcpfc_intersection AS (
+					 SELECT st_collectionextract(st_intersection(iattc_area_of_competence.geom, wcpfc_area_of_competence.geom), 3) AS geom
+					   FROM iattc_area_of_competence,
+						wcpfc_area_of_competence
+					)
+			 SELECT area_labels.id_area,
+				area_labels.codesource_area
+			   FROM area.area_labels,
+				geom_iattc_wcpfc_intersection
+			  WHERE area_labels.tablesource_area = 'cwp_grid'::text AND st_within(area_labels.geom, geom_iattc_wcpfc_intersection.geom))tab;
+			"
+           
+           overlapping_zone_iattc_wcpfc <- dbGetQuery(con, query_areas_overlapping_zone_iattc_wcpfc)
+overlapping_zone_iattc_wcpfc_data_to_keep <- params$overlapping_zone_iattc_wcpfc_data_to_keep
+           if (overlapping_zone_iattc_wcpfc_data_to_keep=="IATTC"){
+             # If we choose to keep the data of the overlapping zone from the IATTC, we remove the data of the overlapping zone from the WCPFC dataset.
+             georef_dataset<-georef_dataset[ which(!(georef_dataset$geographic_identifier %in% overlapping_zone_iattc_wcpfc$codesource_area & georef_dataset$source_authority == "WCPFC")), ]
+             georef_dataset_overlapping_iattc <- georef_dataset
+           } else if (overlapping_zone_iattc_wcpfc_data_to_keep=="WCPFC"){
+             # If we choose to keep the data of the overlapping zone from the WCPFC, we remove the data of the overlapping zone from the IATTC dataset
+             georef_dataset<-georef_dataset[ which(!(georef_dataset$geographic_identifier %in% overlapping_zone_iattc_wcpfc$codesource_area & georef_dataset$source_authority == "IATTC")), ]
+             georef_dataset_overlapping_wcpfc <- georef_dataset
+           }
+           
+           # fill metadata elements
+           # overlap_lineage<-paste0("Concerns IATTC and WCPFC data. IATTC and WCPFC have an overlapping area in their respective area of competence. Data from both RFMOs may be redundant in this overlapping zone. In the overlapping area, only data from ",overlapping_zone_iattc_wcpfc_data_to_keep," were kept.	Information regarding the data in the IATTC / WCPFC overlapping area: after the eventual other corrections applied, e.g. raisings, catch units conversions, etc., the ratio between the catches from IATTC and those from WCPFC was of: ratio_iattc_wcpf_mt for the catches expressed in weight and ratio_iattc_wcpf_no for the catches expressed in number.")
+           # overlap_step <- geoflow_process$new()
+           # overlap_step$setRationale(overlap_lineage)
+           # overlap_step$setProcessor(firms_contact)  #TODO define who's the processor
+           # entity$provenance$processes <- c(entity$provenance$processes, overlap_step)	
+           # entity$descriptions[["abstract"]] <- paste0(entity$descriptions[["abstract"]], "\n", "- In the IATTC/WCPFC overlapping area of competence, only data from ",overlapping_zone_iattc_wcpfc_data_to_keep," were kept\n")
+           
+           #config$logger.info(paste0("Keeping only data from ",overlapping_zone_iattc_wcpfc_data_to_keep," in the IATTC/WCPFC overlapping zone OK"))
+         }
+         
+         ### @juldebar => the lines below generates errors in the workflow thereafter if no patch to restore previous units 
+         ### @eblondel => this code supposes refactoring / evolving of conversion not to rely anymore on MT which is not a standard
+         #-----------------------------------------------------------------------------------------------------------------------------------------------------------
+```
+
+On observe qu'il n'y a pas de données de la WCPFC sur les zones appartenant également à la zone de supervision de l'IATTC.
+
+```{r}
+gear <- fonction_groupement(gear,georef_dataset_sbf_filtered, georef_dataset_overlapping_iattc)
+geographic_identifier <- fonction_groupement(geographic_identifier,georef_dataset_sbf_filtered, georef_dataset_overlapping_iattc)
+
+```
+
+
+Dans cette partie il n'y a pas de traitement qui est fait.
+
+```{r }
+#config$logger.info("LEVEL 0 => STEP 8/8: Units harmonization")
+         #-----------------------------------------------------------------------------------------------------------------------------------------------------------
+         if(any(georef_dataset$unit == "MT")) georef_dataset[georef_dataset$unit == "MT", ]$unit <- "t"
+         if(any(georef_dataset$unit == "NO")) georef_dataset[georef_dataset$unit == "NO", ]$unit <- "no"
+         if(any(georef_dataset$unit == "MTNO")) georef_dataset[georef_dataset$unit == "MTNO", ]$unit <- "t"
+         if(any(georef_dataset$unit == "NOMT")) georef_dataset[georef_dataset$unit == "NOMT", ]$unit <- "no"
+```
+
+# Perte générale sur les données
+
+```{r}
+gear <- fonction_groupement(gear, georef_dataset_init, georef_dataset)
+species <- fonction_groupement(species, georef_dataset_init, georef_dataset)
+```
+
+
