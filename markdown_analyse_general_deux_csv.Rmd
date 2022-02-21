@@ -30,9 +30,9 @@ library(readr)
 colnames_to_keep <- c("fishingfleet",         "gear",                 "time_start",           "time_end",            
 "geographic_identifier","schooltype",           "species",              "catchtype",           
  "unit",                 "value",                "source_authority")
-init <- read.csv(params$init) %>% select(colnames_to_keep)
+init <- load(params$init) %>% select(colnames_to_keep)
 
-final <- read.csv(params$final)%>% select(colnames_to_keep)
+final <- load(params$final)%>% select(colnames_to_keep)
 ```
 
 
